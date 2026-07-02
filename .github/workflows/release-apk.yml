@@ -82,6 +82,28 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare release notes
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSIONED_NOTES="RELEASE_NOTES/${TAG}.md"
+          NOTES_FILE="release-notes.md"
+
+          if [[ -f "$VERSIONED_NOTES" ]]; then
+            cp "$VERSIONED_NOTES" "$NOTES_FILE"
+          else
+            cat > "$NOTES_FILE" <<EOF
+          # Release $TAG
+
+          Built from tag: $TAG
+          Commit: ${{ github.sha }}
+
+          APK files are attached to this release.
+          EOF
+          fi
+
+          echo "Release notes:"
+          cat "$NOTES_FILE"
+
       - name: Upload APK as workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -94,19 +116,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          NOTES_FILE="release-notes.md"
-
-          cat > "$NOTES_FILE" <<EOF
-          Release $TAG
-
-          Built from tag: $TAG
-          Commit: ${{ github.sha }}
-
-          APK files are attached to this release.
-          EOF
 
           gh release create "$TAG" \
             release-artifacts/*.apk \
             --title "$TAG" \
-            --notes-file "$NOTES_FILE" \
+            --notes-file release-notes.md \
             --verify-tag
