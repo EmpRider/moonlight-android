@@ -23,10 +23,9 @@ public class VideoTextureRenderer extends TextureSurfaceRenderer implements Surf
     private static final String VERTEX_SHADER =
             "attribute vec4 vPosition;" +
             "attribute vec4 vTexCoordinate;" +
-            "uniform mat4 textureTransform;" +
-            "varying vec2 v_TexCoordinate;" +
+            "varying vec2 v_OutputCoordinate;" +
             "void main() {" +
-            "  v_TexCoordinate = (textureTransform * vTexCoordinate).xy;" +
+            "  v_OutputCoordinate = vTexCoordinate.xy;" +
             "  gl_Position = vPosition;" +
             "}";
 
@@ -34,11 +33,12 @@ public class VideoTextureRenderer extends TextureSurfaceRenderer implements Surf
             "#extension GL_OES_EGL_image_external : require\n" +
             "precision highp float;" +
             "uniform samplerExternalOES texture;" +
+            "uniform mat4 textureTransform;" +
             "uniform float zoomFactor;" +
             "uniform float distFactor;" +
             "uniform float wrapEnabled;" +
             "uniform float singleView;" +
-            "varying vec2 v_TexCoordinate;" +
+            "varying vec2 v_OutputCoordinate;" +
             "vec2 Warp(vec2 tex) {" +
             "  vec2 newPos = tex;" +
             "  float c = -distFactor / 10.0;" +
@@ -51,24 +51,28 @@ public class VideoTextureRenderer extends TextureSurfaceRenderer implements Surf
             "  newPos.y = (newPos.y + 1.0) * 0.5;" +
             "  return newPos;" +
             "}" +
+            "vec4 SampleDecoderTexture(vec2 uv) {" +
+            "  vec2 transformedUv = (textureTransform * vec4(uv, 0.0, 1.0)).xy;" +
+            "  return texture2D(texture, transformedUv);" +
+            "}" +
             "void main() {" +
+            "  vec2 outputUv = v_OutputCoordinate;" +
             "  if (singleView < 0.5) {" +
-            "    vec2 newPos = v_TexCoordinate;" +
-            "    if (newPos.x < 0.5) {" +
-            "      newPos.x = newPos.x * 2.0;" +
+            "    vec2 sourceUv = outputUv;" +
+            "    if (outputUv.x < 0.5) {" +
+            "      sourceUv.x = outputUv.x * 2.0;" +
             "    } else {" +
-            "      newPos.x = (newPos.x - 0.5) * 2.0;" +
+            "      sourceUv.x = (outputUv.x - 0.5) * 2.0;" +
             "    }" +
-            "    newPos = Warp(newPos);" +
-            "    vec4 color = texture2D(texture, newPos);" +
+            "    sourceUv = Warp(sourceUv);" +
+            "    vec4 color = SampleDecoderTexture(sourceUv);" +
             "    if (wrapEnabled < 0.5) {" +
-            "      vec2 borderStep = step(0.0, newPos) * step(newPos, vec2(1.0, 1.0));" +
+            "      vec2 borderStep = step(0.0, sourceUv) * step(sourceUv, vec2(1.0, 1.0));" +
             "      color *= borderStep.x * borderStep.y;" +
             "    }" +
             "    gl_FragColor = color;" +
             "  } else {" +
-            "    float squeezeFactor = distFactor / 100.0;" +
-            "    gl_FragColor = texture2D(texture, vec2(v_TexCoordinate.x, v_TexCoordinate.y * squeezeFactor - (squeezeFactor * 0.5)));" +
+            "    gl_FragColor = SampleDecoderTexture(outputUv);" +
             "  }" +
             "}";
 
@@ -110,11 +114,12 @@ public class VideoTextureRenderer extends TextureSurfaceRenderer implements Surf
     private boolean frameAvailable = false;
     private int videoWidth;
     private int videoHeight;
-    private boolean adjustViewport = false;
+    private boolean adjustViewport = true;
 
     public VideoTextureRenderer(Context context, SurfaceTexture outputTexture, int width, int height, OnGlReadyListener listener) {
         super(outputTexture, width, height, listener);
         this.context = context;
+        startRendererThread();
     }
 
     public boolean isZoomedIn() {
@@ -143,6 +148,12 @@ public class VideoTextureRenderer extends TextureSurfaceRenderer implements Surf
 
     public SurfaceTexture getVideoTexture() {
         return videoTexture;
+    }
+
+    public void setOutputSize(int width, int height) {
+        this.width = width;
+        this.height = height;
+        adjustViewport = true;
     }
 
     public void setVideoSize(int width, int height) {
@@ -204,8 +215,8 @@ public class VideoTextureRenderer extends TextureSurfaceRenderer implements Surf
         GLES20.glEnableVertexAttribArray(positionHandle);
         GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 4 * 3, vertexBuffer);
 
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textures[0]);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textures[0]);
         GLES20.glUniform1i(textureParamHandle, 0);
 
         GLES20.glEnableVertexAttribArray(textureCoordinateHandle);
@@ -291,24 +302,7 @@ public class VideoTextureRenderer extends TextureSurfaceRenderer implements Surf
     }
 
     private void adjustViewport() {
-        if (videoWidth <= 0 || videoHeight <= 0) {
-            GLES20.glViewport(0, 0, width, height);
-        } else {
-            float surfaceAspect = height / (float) width;
-            float videoAspect = videoHeight / (float) videoWidth;
-
-            if (surfaceAspect > videoAspect) {
-                float heightRatio = height / (float) videoHeight;
-                int newWidth = (int) (videoWidth * heightRatio);
-                int xOffset = (newWidth - width) / 2;
-                GLES20.glViewport(-xOffset, 0, newWidth, height);
-            } else {
-                float widthRatio = width / (float) videoWidth;
-                int newHeight = (int) (videoHeight * widthRatio);
-                int yOffset = (newHeight - height) / 2;
-                GLES20.glViewport(0, -yOffset, width, newHeight);
-            }
-        }
+        GLES20.glViewport(0, 0, width, height);
         adjustViewport = false;
     }
 
