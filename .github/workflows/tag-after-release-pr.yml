@@ -1,0 +1,77 @@
+name: Tag After Release PR Merge
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - closed
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: tag-after-release-pr
+  cancel-in-progress: false
+
+jobs:
+  create-version-tag:
+    name: Create version tag
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
+
+    steps:
+      - name: Checkout merged master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read and validate VERSION
+        id: version
+        run: |
+          if [[ ! -f VERSION ]]; then
+            echo "VERSION file is missing. Release PRs must update VERSION."
+            exit 1
+          fi
+
+          VERSION="$(cat VERSION | tr -d '[:space:]')"
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          EXPECTED_BRANCH="release/$VERSION"
+
+          echo "VERSION=$VERSION"
+          echo "Release branch=$BRANCH"
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid VERSION format. Expected v1.0.0"
+            exit 1
+          fi
+
+          if [[ "$BRANCH" != "$EXPECTED_BRANCH" ]]; then
+            echo "Release branch must match VERSION. Expected $EXPECTED_BRANCH but got $BRANCH"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag does not already exist
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git fetch --tags
+
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists. Release versions must be unique."
+            exit 1
+          fi
+
+      - name: Create and push version tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"

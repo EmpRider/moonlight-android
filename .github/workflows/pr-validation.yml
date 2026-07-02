@@ -1,0 +1,96 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-pr:
+    name: Validate branch and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Validate branch name
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          echo "Branch: $BRANCH"
+
+          if [[ "$BRANCH" == "master" ]]; then
+            echo "Direct work on master is not allowed. Open a PR from a sub-branch."
+            exit 1
+          fi
+
+          if [[ ! "$BRANCH" =~ ^(feature|bugfix|hotfix|release|chore)/.+$ ]]; then
+            echo "Invalid branch name: $BRANCH"
+            echo "Allowed prefixes: feature/, bugfix/, hotfix/, release/, chore/"
+            exit 1
+          fi
+
+      - name: Validate release branch version
+        if: startsWith(github.head_ref, 'release/')
+        run: |
+          if [[ ! -f VERSION ]]; then
+            echo "Release branches must include a VERSION file."
+            exit 1
+          fi
+
+          VERSION="$(cat VERSION | tr -d '[:space:]')"
+          BRANCH="${{ github.head_ref }}"
+          EXPECTED_BRANCH="release/$VERSION"
+
+          echo "VERSION=$VERSION"
+          echo "Expected branch=$EXPECTED_BRANCH"
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid VERSION format. Expected v1.0.0"
+            exit 1
+          fi
+
+          if [[ "$BRANCH" != "$EXPECTED_BRANCH" ]]; then
+            echo "Release branch must match VERSION. Expected $EXPECTED_BRANCH but got $BRANCH"
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;27.0.12077973"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Build non-root debug APK for PR validation
+        run: ./gradlew --no-daemon clean assembleNonRootDebug

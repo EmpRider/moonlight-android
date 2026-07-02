@@ -1,8 +1,8 @@
-name: Build Android APK
+name: Build Android APK Validation
 
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     branches:
       - master
     paths:
@@ -11,17 +11,18 @@ on:
       - "settings.gradle"
       - "gradle/**"
       - "gradlew"
-      - ".github/workflows/build-apk.yml"
-  pull_request:
-    branches:
-      - master
+      - ".github/workflows/**"
 
 permissions:
   contents: read
 
+concurrency:
+  group: build-validation-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   build-nonroot-debug-apk:
-    name: Build non-root debug APK
+    name: Build non-root debug APK validation
     runs-on: ubuntu-latest
 
     steps:
@@ -56,15 +57,9 @@ jobs:
       - name: Build non-root debug APK
         run: ./gradlew --no-daemon clean assembleNonRootDebug
 
-      - name: Collect APK
-        run: |
-          mkdir -p artifacts
-          cp app/build/outputs/apk/nonRoot/debug/*.apk artifacts/
-          ls -la artifacts
-
-      - name: Upload APK artifact
+      - name: Upload validation APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: moonlight-android-nonroot-debug-apk
-          path: artifacts/*.apk
+          name: moonlight-android-validation-apk
+          path: app/build/outputs/apk/nonRoot/debug/*.apk
           if-no-files-found: error
