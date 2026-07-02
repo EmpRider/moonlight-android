@@ -1,4 +1,4 @@
-name: Tag After Release PR Merge
+name: Publish Release After Release PR Merge
 
 on:
   pull_request:
@@ -11,13 +11,16 @@ permissions:
   contents: write
   pull-requests: read
 
+env:
+  APK_OUTPUT_DIR: release-artifacts
+
 concurrency:
-  group: tag-after-release-pr
+  group: publish-release-after-release-pr
   cancel-in-progress: false
 
 jobs:
-  create-version-tag:
-    name: Create version tag
+  publish-release:
+    name: Create tag, build APK, and publish release
     runs-on: ubuntu-latest
     if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
 
@@ -26,6 +29,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: master
+          submodules: recursive
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -56,7 +60,9 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure tag does not already exist
+      - name: Ensure tag and release do not already exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git fetch --tags
@@ -65,6 +71,72 @@ jobs:
             echo "Tag $VERSION already exists. Release versions must be unique."
             exit 1
           fi
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists. Release versions must be unique."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;27.0.12077973"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Build non-root debug APK
+        run: ./gradlew --no-daemon clean assembleNonRootDebug
+
+      - name: Collect APK files
+        run: |
+          mkdir -p "$APK_OUTPUT_DIR"
+          find app/build/outputs/apk -name "*.apk" -type f -exec cp {} "$APK_OUTPUT_DIR"/ \;
+          ls -la "$APK_OUTPUT_DIR"
+
+      - name: Validate APK exists
+        run: |
+          APK_COUNT=$(find "$APK_OUTPUT_DIR" -name "*.apk" | wc -l)
+          if [[ "$APK_COUNT" -eq 0 ]]; then
+            echo "No APK files were generated."
+            exit 1
+          fi
+
+      - name: Prepare release notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSIONED_NOTES="RELEASE_NOTES/${VERSION}.md"
+          NOTES_FILE="release-notes.md"
+
+          if [[ -f "$VERSIONED_NOTES" ]]; then
+            cp "$VERSIONED_NOTES" "$NOTES_FILE"
+          else
+            cat > "$NOTES_FILE" <<EOF
+          # Release $VERSION
+
+          Built from release branch: ${{ github.event.pull_request.head.ref }}
+          Merge commit: ${{ github.sha }}
+
+          APK files are attached to this release.
+          EOF
+          fi
+
+          echo "Release notes:"
+          cat "$NOTES_FILE"
 
       - name: Create and push version tag
         run: |
@@ -75,3 +147,22 @@ jobs:
 
           git tag -a "$VERSION" -m "Release $VERSION"
           git push origin "$VERSION"
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ steps.version.outputs.version }}
+          path: release-artifacts/*.apk
+          if-no-files-found: error
+
+      - name: Create GitHub Release and upload APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          gh release create "$VERSION" \
+            release-artifacts/*.apk \
+            --title "$VERSION" \
+            --notes-file release-notes.md \
+            --verify-tag
