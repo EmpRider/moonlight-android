@@ -13,9 +13,9 @@ import javax.microedition.khronos.egl.EGLSurface;
 /**
  * Small OpenGL ES 2.0 renderer that draws into a TextureView SurfaceTexture.
  *
- * This is intentionally isolated from Moonlight's normal decoder path. SBS mode uses it as an
- * opt-in post-processing pass: MediaCodec decodes into an external texture, then this renderer
- * draws that texture to the visible output using the SBS fragment shader.
+ * The render thread is started explicitly by subclasses after their own fields are initialized.
+ * Starting the thread from this base constructor is unsafe because Java can dispatch abstract
+ * methods before subclass initialization has completed.
  */
 public abstract class TextureSurfaceRenderer implements Runnable {
     private static final int EGL_OPENGL_ES2_BIT = 4;
@@ -31,6 +31,7 @@ public abstract class TextureSurfaceRenderer implements Runnable {
     private EGLContext eglContext;
     private EGLSurface eglSurface;
     private volatile boolean running;
+    private Thread renderThread;
 
     private final OnGlReadyListener onGlReadyListener;
 
@@ -39,45 +40,60 @@ public abstract class TextureSurfaceRenderer implements Runnable {
         this.width = width;
         this.height = height;
         this.onGlReadyListener = listener;
-        this.running = true;
+    }
 
-        Thread thread = new Thread(this, "SBS GL Renderer");
-        thread.start();
+    protected synchronized void startRendererThread() {
+        if (renderThread != null) {
+            return;
+        }
+
+        running = true;
+        renderThread = new Thread(this, "SBS GL Renderer");
+        renderThread.start();
     }
 
     @Override
     public void run() {
-        initGL();
-        initGLComponents();
-        Log.d(LOG_TAG, "OpenGL init OK");
+        try {
+            initGL();
+            initGLComponents();
+            Log.d(LOG_TAG, "OpenGL init OK");
 
-        if (onGlReadyListener != null) {
-            onGlReadyListener.onGlReady();
-        }
-
-        while (running) {
-            long loopStart = System.currentTimeMillis();
-
-            if (draw()) {
-                egl.eglSwapBuffers(eglDisplay, eglSurface);
+            if (onGlReadyListener != null) {
+                onGlReadyListener.onGlReady();
             }
 
-            long waitDelta = 16 - (System.currentTimeMillis() - loopStart);
-            if (waitDelta > 0) {
-                try {
-                    Thread.sleep(waitDelta);
-                } catch (InterruptedException ignored) {
-                    // Re-check running on the next loop.
+            while (running) {
+                long loopStart = System.currentTimeMillis();
+
+                if (draw()) {
+                    egl.eglSwapBuffers(eglDisplay, eglSurface);
+                }
+
+                long waitDelta = 16 - (System.currentTimeMillis() - loopStart);
+                if (waitDelta > 0) {
+                    try {
+                        Thread.sleep(waitDelta);
+                    } catch (InterruptedException ignored) {
+                        // Re-check running on the next loop.
+                    }
                 }
             }
+        } finally {
+            try {
+                deinitGLComponents();
+            } catch (Exception ignored) {
+                // Best-effort cleanup.
+            }
+            deinitGL();
         }
-
-        deinitGLComponents();
-        deinitGL();
     }
 
     public void onPause() {
         running = false;
+        if (renderThread != null) {
+            renderThread.interrupt();
+        }
     }
 
     protected abstract boolean draw();
@@ -105,10 +121,19 @@ public abstract class TextureSurfaceRenderer implements Runnable {
     }
 
     private void deinitGL() {
+        if (egl == null) {
+            return;
+        }
         egl.eglMakeCurrent(eglDisplay, EGL10.EGL_NO_SURFACE, EGL10.EGL_NO_SURFACE, EGL10.EGL_NO_CONTEXT);
-        egl.eglDestroySurface(eglDisplay, eglSurface);
-        egl.eglDestroyContext(eglDisplay, eglContext);
-        egl.eglTerminate(eglDisplay);
+        if (eglSurface != null) {
+            egl.eglDestroySurface(eglDisplay, eglSurface);
+        }
+        if (eglContext != null) {
+            egl.eglDestroyContext(eglDisplay, eglContext);
+        }
+        if (eglDisplay != null) {
+            egl.eglTerminate(eglDisplay);
+        }
         Log.d(LOG_TAG, "OpenGL deinit OK");
     }
 
